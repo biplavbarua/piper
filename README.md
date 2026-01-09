@@ -46,3 +46,6 @@ cargo run
 *   `D` - Delete
 *   `J` / `K` (or Arrows) - Navigate
 *   `Q` - Quit
+
+## License
+MIT © Biplav Barua
