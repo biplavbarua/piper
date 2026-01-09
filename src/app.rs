@@ -43,11 +43,12 @@ pub struct App {
     pub is_restoring: bool,
     pub show_details: bool,
     pub spinner_state: u8,
+    pub scan_path: PathBuf,
     pub rx: Option<Receiver<AppMessage>>,
 }
 
 impl App {
-    pub fn new() -> App {
+    pub fn new(scan_path: PathBuf) -> App {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
 
@@ -61,6 +62,7 @@ impl App {
             is_restoring: false,
             show_details: false,
             spinner_state: 0,
+            scan_path,
             rx: None,
         }
     }
@@ -200,20 +202,20 @@ impl App {
         let (tx, rx): (Sender<AppMessage>, Receiver<AppMessage>) = mpsc::channel();
         self.rx = Some(rx);
 
+        let scan_root = self.scan_path.clone();
+
         thread::spawn(move || {
             let mut results = Vec::new();
-            if let Some(mut dev_dir) = dirs::home_dir() {
-                dev_dir.push("Developer");
-                let scan_res = scanner::scan_logs(&dev_dir);
-                
-                for res in scan_res {
-                    results.push(FileItem {
-                        path: res.path.to_string_lossy().to_string(),
-                        original_size: res.size,
-                        compressed_size: None,
-                        status: FileStatus::Found,
-                    });
-                }
+            // Use configured path
+            let scan_res = scanner::scan_logs(&scan_root);
+                 
+            for res in scan_res {
+                results.push(FileItem {
+                    path: res.path.to_string_lossy().to_string(),
+                    original_size: res.size,
+                    compressed_size: None,
+                    status: FileStatus::Found,
+                });
             }
             let _ = tx.send(AppMessage::ScanComplete(results));
         });

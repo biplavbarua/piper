@@ -1,5 +1,7 @@
 use anyhow::Result;
 use std::{io, time::Duration};
+use std::path::PathBuf;
+use clap::Parser;
 
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -18,7 +20,30 @@ mod ui;
 
 use app::App;
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Path to scan for optimization (default: ~/Developer)
+    #[arg(short, long)]
+    scan: Option<String>,
+}
+
 fn main() -> Result<()> {
+    let args = Args::parse();
+
+    let scan_path = if let Some(path_str) = args.scan {
+        PathBuf::from(path_str)
+    } else {
+        // Default: ~/Developer
+        match dirs::home_dir() {
+            Some(mut p) => {
+                p.push("Developer");
+                p
+            },
+            None => PathBuf::from("."), // Fallback
+        }
+    };
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -26,8 +51,8 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Create app
-    let mut app = App::new();
+    // Create app with path
+    let mut app = App::new(scan_path);
 
     // Run app
     let res = run_app(&mut terminal, &mut app);
