@@ -1,8 +1,28 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::path::PathBuf;
+use ratatui::widgets::ListState;
+use crossterm::event::KeyCode;
 
-// ... (FileItem & FileStatus definitions are fine, ensure FileStatus::Deleted exists from previous step)
+use crate::scanner;
+use crate::compressor;
+
+pub struct FileItem {
+    pub path: String,
+    pub original_size: u64,
+    pub compressed_size: Option<u64>,
+    pub status: FileStatus,
+}
+
+#[derive(PartialEq)]
+pub enum FileStatus {
+    Found,
+    Compressing,
+    Done,
+    Error,
+    Deleted,
+}
 
 pub enum AppMessage {
     ScanComplete(Vec<FileItem>),
@@ -34,8 +54,44 @@ impl App {
         }
     }
 
-    // ... (handle_input same, just ensure it calls start_scan) ...
-    // ... (next/previous same) ...
+    pub fn handle_input(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Down | KeyCode::Char('j') => self.next(),
+            KeyCode::Up | KeyCode::Char('k') => self.previous(),
+            KeyCode::Char('s') => self.start_scan(),
+            KeyCode::Char('c') => self.start_compression(),
+            KeyCode::Char('d') => self.delete_item(),
+            _ => {}
+        }
+    }
+
+    pub fn next(&mut self) {
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i >= self.items.len().saturating_sub(1) {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.list_state.select(Some(i));
+    }
+
+    pub fn previous(&mut self) {
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.items.len().saturating_sub(1)
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.list_state.select(Some(i));
+    }
 
     pub fn tick(&mut self) {
         if self.is_scanning {
@@ -49,7 +105,6 @@ impl App {
                             self.items = items;
                             self.is_scanning = false;
                             self.rx = None;
-                            // Select first item if available
                             if !self.items.is_empty() {
                                 self.list_state.select(Some(0));
                             }
@@ -61,20 +116,17 @@ impl App {
     }
 
     fn start_scan(&mut self) {
-        if self.is_scanning { return; } // Prevent double scan
+        if self.is_scanning { return; }
         self.is_scanning = true;
-        self.items.clear(); // Clear existing lists visually immediately or keep them? User said "stuck then appears". Clearing implies loading.
+        self.items.clear(); 
 
         let (tx, rx): (Sender<AppMessage>, Receiver<AppMessage>) = mpsc::channel();
         self.rx = Some(rx);
 
         thread::spawn(move || {
-            // Scan ~/Developer 
             let mut results = Vec::new();
             if let Some(mut dev_dir) = dirs::home_dir() {
                 dev_dir.push("Developer");
-                // Artificial delay to show off the cool spinner?
-                // thread::sleep(Duration::from_millis(500)); 
                 let scan_res = scanner::scan_logs(&dev_dir);
                 
                 for res in scan_res {
@@ -91,7 +143,6 @@ impl App {
     }
 
     fn start_compression(&mut self) {
-        // ... (unchanged logic, just ensuring function exists)
         let mut savings = 0;
         for i in 0..self.items.len() {
              if self.items[i].status == FileStatus::Found {
@@ -113,6 +164,7 @@ impl App {
         }
         self.total_savings += savings;
         
+        // Weissman Score Formula
         let total_original = self.items.iter().map(|i| i.original_size).sum::<u64>() as f64;
         let total_compressed = self.items.iter().map(|i| i.compressed_size.unwrap_or(i.original_size)).sum::<u64>() as f64;
         
@@ -129,7 +181,6 @@ impl App {
             if i < self.items.len() {
                 let path = PathBuf::from(&self.items[i].path);
                 if path.exists() {
-                    // Try to remove file or dir
                     let res = if path.is_dir() {
                         std::fs::remove_dir_all(&path)
                     } else {
@@ -139,7 +190,6 @@ impl App {
                     match res {
                         Ok(_) => {
                             self.items[i].status = FileStatus::Deleted;
-                            // Add full size to savings since it's gone!
                             self.total_savings += self.items[i].original_size; 
                         }
                         Err(_) => {

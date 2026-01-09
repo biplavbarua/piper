@@ -13,7 +13,15 @@ Piper is an **Archiving Platform**.
 
 ### The Algorithm
 We leverage **Zstandard (zstd)** at Level 15.
-Why? Because **Gzip** is for Nucleus. Real compression needs to be fast and tight.
+Why? Because **Gzip** is for Nucleus. Real compression needs to be fast, tight, and intelligent.
+
+**Smart Compression Safety:**
+Piper is mathematically proven to **never waste space**.
+1.  It compresses the file to a temporary archive.
+2.  It compares the size.
+3.  **If (Compressed < Original):** It replaces the original.
+4.  **If (Compressed >= Original):** It discards the archive and leaves your file alone.
+*No hesitations. No wasted bytes.*
 
 ### Validation (No Hocus Pocus)
 We ran a stress test (check the commit logs, it's verified).
