@@ -15,6 +15,9 @@ pub fn scan_logs(root: &Path) -> Vec<ScanResult> {
     // Relaxed scanner for MVP
     let walker = WalkDir::new(root).into_iter();
     
+    // Threshold: 30 days in seconds
+    let staleness_threshold = 30 * 24 * 60 * 60; 
+
     for entry in walker.filter_entry(|e| !is_hidden(e)) {
         let entry = match entry {
             Ok(e) => e,
@@ -40,13 +43,21 @@ pub fn scan_logs(root: &Path) -> Vec<ScanResult> {
         // 2. Check for Log Files
         if entry.file_type().is_file() {
             if let Some(ext) = path.extension() {
-                if ext == "log" || ext == "txt" {
+                let ext_str = ext.to_string_lossy();
+                if ext_str == "log" || ext_str == "txt" {
                     if let Ok(metadata) = entry.metadata() {
                         if metadata.len() > 1024 { // > 1KB
-                            results.push(ScanResult {
-                                path: path.to_path_buf(),
-                                size: metadata.len(),
-                            });
+                            // Smart Context: Check Access Time
+                            if let Ok(accessed) = metadata.accessed() {
+                                if let Ok(duration) = now.duration_since(accessed) {
+                                    if duration.as_secs() > staleness_threshold {
+                                        results.push(ScanResult {
+                                            path: path.to_path_buf(),
+                                            size: metadata.len(),
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
