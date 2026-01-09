@@ -43,6 +43,31 @@ pub fn compress_file(input_path: &Path) -> Result<CompressionStats> {
     }
 }
 
+pub fn decompress_file(input_path: &Path) -> Result<u64> {
+    // 1. Verify Extension
+    if input_path.extension().map_or(true, |ext| ext != "zst") {
+        return Err(anyhow::anyhow!("File is not a .zst archive"));
+    }
+
+    let input_file = File::open(input_path)?;
+    let reader = BufReader::new(input_file);
+
+    // 2. Determine Output Path (remove .zst)
+    let output_path = input_path.with_extension(""); // Removes .zst
+    
+    let output_file = File::create(&output_path)?;
+    let writer = BufWriter::new(output_file);
+
+    // 3. Decompress
+    zstd::stream::copy_decode(reader, writer)?;
+
+    // 4. Verification & Cleanup
+    let restored_size = output_path.metadata()?.len();
+    std::fs::remove_file(input_path)?;
+    
+    Ok(restored_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

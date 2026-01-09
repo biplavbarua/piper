@@ -23,12 +23,14 @@ pub enum FileStatus {
     Done,
     Error,
     Deleted,
+    Restored,
 }
 
 pub enum AppMessage {
     ScanComplete(Vec<FileItem>),
     CompressionProgress(usize, Result<CompressionStats, String>),
     CompressionDone,
+    RestorationDone(usize, bool), // index, success
 }
 
 pub struct App {
@@ -38,6 +40,7 @@ pub struct App {
     pub total_savings: u64,
     pub is_scanning: bool,
     pub is_compressing: bool,
+    pub is_restoring: bool,
     pub show_details: bool,
     pub spinner_state: u8,
     pub rx: Option<Receiver<AppMessage>>,
@@ -55,6 +58,7 @@ impl App {
             total_savings: 0,
             is_scanning: false,
             is_compressing: false,
+            is_restoring: false,
             show_details: false,
             spinner_state: 0,
             rx: None,
@@ -67,8 +71,9 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.previous(),
             KeyCode::Char('s') => self.start_scan(),
             KeyCode::Char('c') => self.start_compression(),
-            // Safety: Block deletion during compression to preserve index integrity
-            KeyCode::Char('d') if !self.is_compressing => self.delete_item(),
+            // Safety: Block operations during active work
+            KeyCode::Char('d') if !self.is_compressing && !self.is_restoring => self.delete_item(),
+            KeyCode::Char('e') if !self.is_compressing && !self.is_restoring => self.restore_item(),
             KeyCode::Enter => self.toggle_details(),
             _ => {}
         }
@@ -149,6 +154,23 @@ impl App {
                     }
                     AppMessage::CompressionDone => {
                         self.is_compressing = false;
+                        self.rx = None;
+                    }
+                    AppMessage::RestorationDone(idx, success) => {
+                        if idx < self.items.len() && success {
+                            self.items[idx].status = FileStatus::Restored;
+                            // Revert Stats
+                            if let Some(compressed) = self.items[idx].compressed_size {
+                                if self.items[idx].original_size > compressed {
+                                    self.total_savings = self.total_savings.saturating_sub(self.items[idx].original_size - compressed);
+                                }
+                            }
+                            self.items[idx].compressed_size = None;
+                            self.calculate_score();
+                        } else if idx < self.items.len() {
+                             self.items[idx].status = FileStatus::Error;
+                        }
+                        self.is_restoring = false;
                         self.rx = None;
                     }
                 }
@@ -255,6 +277,38 @@ impl App {
                             self.items[i].status = FileStatus::Error;
                         }
                     }
+                }
+            }
+        }
+    }
+
+
+    fn restore_item(&mut self) {
+        if self.is_scanning || self.is_compressing || self.is_restoring { return; }
+
+        if let Some(i) = self.list_state.selected() {
+            if i < self.items.len() {
+                // Restoration only makes sense for Compressed (Done) items
+                if self.items[i].status == FileStatus::Done {
+                    self.is_restoring = true;
+                    // Optimistic update
+                    self.items[i].status = FileStatus::Compressing; // Reuse spinner
+
+                    let (tx, rx): (Sender<AppMessage>, Receiver<AppMessage>) = mpsc::channel();
+                    self.rx = Some(rx);
+
+                    let path = PathBuf::from(&self.items[i].path);
+
+                    thread::spawn(move || {
+                        // Decompress
+                        let zst_path = path.with_extension(format!("{}.zst", path.extension().unwrap_or_default().to_string_lossy()));
+                        
+                        let success = match compressor::decompress_file(&zst_path) {
+                            Ok(_) => true,
+                            Err(_) => false,
+                        };
+                        let _ = tx.send(AppMessage::RestorationDone(i, success));
+                    });
                 }
             }
         }

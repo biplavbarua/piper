@@ -50,6 +50,7 @@ fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
                 FileStatus::Done => "✅",
                 FileStatus::Error => "❌",
                 FileStatus::Deleted => "🗑️ ",
+                FileStatus::Restored => "↩ ",
             };
             
             let size_info = if let Some(comp) = i.compressed_size {
@@ -105,7 +106,7 @@ fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_footer(f: &mut Frame, _app: &App, area: Rect) {
-    let instructions = Paragraph::new(" [Q] Quit | [S] Scan | [C] Compress | [D] Delete | [J/K] Navigate | [Enter] Details ")
+    let instructions = Paragraph::new(" [Q] Quit | [S] Scan | [C] Compress | [D] Delete | [E] Restore | [J/K] Navigate | [Enter] Details ")
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(instructions, area);
 }
