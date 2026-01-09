@@ -4,6 +4,7 @@ use std::time::Duration;
 use std::path::PathBuf;
 use ratatui::widgets::ListState;
 use crossterm::event::KeyCode;
+use rayon::prelude::*;
 
 use crate::scanner;
 use crate::compressor::{self, CompressionStats};
@@ -216,13 +217,12 @@ impl App {
         }
 
         thread::spawn(move || {
-            for (idx, path) in targets {
+            // Parallel Compression using Rayon
+            targets.into_par_iter().for_each_with(tx.clone(), |s, (idx, path)| {
                 let res = compressor::compress_file(&path).map_err(|e| e.to_string());
-                let _ = tx.send(AppMessage::CompressionProgress(idx, res));
-                // Artificial delay for visual effect? No, let it blaze.
-                // But tiny sleep helps UI loop catch up if it's too fast?
-                // thread::sleep(Duration::from_millis(50)); 
-            }
+                let _ = s.send(AppMessage::CompressionProgress(idx, res));
+            });
+            
             let _ = tx.send(AppMessage::CompressionDone);
         });
     }
