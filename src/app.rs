@@ -6,7 +6,7 @@ use ratatui::widgets::ListState;
 use crossterm::event::KeyCode;
 
 use crate::scanner;
-use crate::compressor;
+use crate::compressor::{self, CompressionStats};
 
 pub struct FileItem {
     pub path: String,
@@ -26,6 +26,8 @@ pub enum FileStatus {
 
 pub enum AppMessage {
     ScanComplete(Vec<FileItem>),
+    CompressionProgress(usize, Result<CompressionStats, String>),
+    CompressionDone,
 }
 
 pub struct App {
@@ -34,6 +36,8 @@ pub struct App {
     pub weissman_score: f64,
     pub total_savings: u64,
     pub is_scanning: bool,
+    pub is_compressing: bool,
+    pub show_details: bool,
     pub spinner_state: u8,
     pub rx: Option<Receiver<AppMessage>>,
 }
@@ -49,6 +53,8 @@ impl App {
             weissman_score: 5.2,
             total_savings: 0,
             is_scanning: false,
+            is_compressing: false,
+            show_details: false,
             spinner_state: 0,
             rx: None,
         }
@@ -60,8 +66,16 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.previous(),
             KeyCode::Char('s') => self.start_scan(),
             KeyCode::Char('c') => self.start_compression(),
-            KeyCode::Char('d') => self.delete_item(),
+            // Safety: Block deletion during compression to preserve index integrity
+            KeyCode::Char('d') if !self.is_compressing => self.delete_item(),
+            KeyCode::Enter => self.toggle_details(),
             _ => {}
+        }
+    }
+
+    pub fn toggle_details(&mut self) {
+        if !self.items.is_empty() {
+             self.show_details = !self.show_details;
         }
     }
 
@@ -94,31 +108,71 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        if self.is_scanning {
+        if self.is_scanning || self.is_compressing {
             self.spinner_state = (self.spinner_state + 1) % 4;
             
             // Check for results
+            let mut messages = Vec::new();
             if let Some(rx) = &self.rx {
-                if let Ok(msg) = rx.try_recv() {
-                    match msg {
-                        AppMessage::ScanComplete(items) => {
-                            self.items = items;
-                            self.is_scanning = false;
-                            self.rx = None;
-                            if !self.items.is_empty() {
-                                self.list_state.select(Some(0));
-                            }
+                while let Ok(msg) = rx.try_recv() {
+                    messages.push(msg);
+                }
+            }
+
+            for msg in messages {
+                match msg {
+                    AppMessage::ScanComplete(items) => {
+                        self.items = items;
+                        self.is_scanning = false;
+                        self.rx = None;
+                        if !self.items.is_empty() {
+                            self.list_state.select(Some(0));
                         }
+                    }
+                    AppMessage::CompressionProgress(idx, result) => {
+                        if idx < self.items.len() {
+                            match result {
+                                Ok(stats) => {
+                                    self.items[idx].status = FileStatus::Done;
+                                    self.items[idx].compressed_size = Some(stats.compressed_size);
+                                    if stats.original_size > stats.compressed_size {
+                                        self.total_savings += stats.original_size - stats.compressed_size;
+                                    }
+                                },
+                                Err(_) => {
+                                    self.items[idx].status = FileStatus::Error;
+                                }
+                            }
+                            self.calculate_score();
+                        }
+                    }
+                    AppMessage::CompressionDone => {
+                        self.is_compressing = false;
+                        self.rx = None;
                     }
                 }
             }
         }
     }
 
+    fn calculate_score(&mut self) {
+        let total_original = self.items.iter().map(|i| i.original_size).sum::<u64>() as f64;
+        let total_compressed = self.items.iter().map(|i| i.compressed_size.unwrap_or(i.original_size)).sum::<u64>() as f64;
+        
+        if total_compressed > 0.0 {
+            let ratio = total_original / total_compressed;
+            self.weissman_score = ratio * 2.6; 
+        } else {
+            self.weissman_score = 0.0;
+        }
+    }
+
     fn start_scan(&mut self) {
-        if self.is_scanning { return; }
+        if self.is_scanning || self.is_compressing { return; }
         self.is_scanning = true;
         self.items.clear(); 
+        self.weissman_score = 0.0;
+        self.total_savings = 0;
 
         let (tx, rx): (Sender<AppMessage>, Receiver<AppMessage>) = mpsc::channel();
         self.rx = Some(rx);
@@ -143,37 +197,34 @@ impl App {
     }
 
     fn start_compression(&mut self) {
-        let mut savings = 0;
-        for i in 0..self.items.len() {
-             if self.items[i].status == FileStatus::Found {
-                 self.items[i].status = FileStatus::Compressing;
-                 let path = PathBuf::from(&self.items[i].path);
-                 match compressor::compress_file(&path) {
-                     Ok(stats) => {
-                         self.items[i].status = FileStatus::Done;
-                         self.items[i].compressed_size = Some(stats.compressed_size);
-                         if stats.original_size > stats.compressed_size {
-                             savings += stats.original_size - stats.compressed_size;
-                         }
-                     },
-                     Err(_) => {
-                         self.items[i].status = FileStatus::Error;
-                     }
-                 }
-             }
+        if self.is_scanning || self.is_compressing { return; }
+        self.is_compressing = true;
+
+        let (tx, rx): (Sender<AppMessage>, Receiver<AppMessage>) = mpsc::channel();
+        self.rx = Some(rx);
+
+        // Collect files to compress (indices and paths) to pass to thread
+        // We verify status is Found to avoid re-compressing
+        let targets: Vec<(usize, PathBuf)> = self.items.iter().enumerate()
+            .filter(|(_, item)| item.status == FileStatus::Found)
+            .map(|(i, item)| (i, PathBuf::from(&item.path)))
+            .collect();
+
+        // Mark them as compressing in UI immediately
+        for (i, _) in &targets {
+            self.items[*i].status = FileStatus::Compressing;
         }
-        self.total_savings += savings;
-        
-        // Weissman Score Formula
-        let total_original = self.items.iter().map(|i| i.original_size).sum::<u64>() as f64;
-        let total_compressed = self.items.iter().map(|i| i.compressed_size.unwrap_or(i.original_size)).sum::<u64>() as f64;
-        
-        if total_compressed > 0.0 {
-            let ratio = total_original / total_compressed;
-            self.weissman_score = ratio * 2.6; 
-        } else {
-            self.weissman_score = 0.0;
-        }
+
+        thread::spawn(move || {
+            for (idx, path) in targets {
+                let res = compressor::compress_file(&path).map_err(|e| e.to_string());
+                let _ = tx.send(AppMessage::CompressionProgress(idx, res));
+                // Artificial delay for visual effect? No, let it blaze.
+                // But tiny sleep helps UI loop catch up if it's too fast?
+                // thread::sleep(Duration::from_millis(50)); 
+            }
+            let _ = tx.send(AppMessage::CompressionDone);
+        });
     }
 
     fn delete_item(&mut self) {
@@ -190,7 +241,15 @@ impl App {
                     match res {
                         Ok(_) => {
                             self.items[i].status = FileStatus::Deleted;
-                            self.total_savings += self.items[i].original_size; 
+                            self.calculate_score(); // Recalc score ignoring this? Or keeping it?
+                            // Logic: If deleted, it counts as 100% savings? 
+                            // Or just remove from score calculation?
+                            // Current calc_score uses all items.
+                            // If deleted, compressed size?
+                            // Let's say deleted means size becomes 0.
+                            self.items[i].compressed_size = Some(0);
+                            self.total_savings += self.items[i].original_size;
+                            self.calculate_score();
                         }
                         Err(_) => {
                             self.items[i].status = FileStatus::Error;
