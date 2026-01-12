@@ -5,9 +5,11 @@ use std::path::PathBuf;
 use ratatui::widgets::TableState;
 use crossterm::event::KeyCode;
 use rayon::prelude::*;
+use sysinfo::System; // sysinfo 0.37: inherent methods
 
 use crate::spyder::{self, Spyder};
 use crate::compressor::{self, CompressionStats};
+use crate::analytics::AnalyticsHistory; // Import
 
 pub struct FileItem {
     pub path: String,
@@ -32,12 +34,14 @@ pub enum AppMessage {
     ScanComplete(Vec<FileItem>),
     CompressionProgress(usize, Result<CompressionStats, String>),
     CompressionDone,
-    RestorationDone(usize, bool), // index, success
+    RestorationDone(usize, bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppTab {
     Scanner,
+    Analytics, // Re-enabled
+    Status,    // New
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,7 +51,7 @@ pub enum AppView {
 }
 
 pub struct App {
-    pub view: AppView, // New field for View State
+    pub view: AppView,
     pub items: Vec<FileItem>,
     pub list_state: TableState,
     pub weissman_score: f64,
@@ -62,15 +66,34 @@ pub struct App {
 
     pub current_tab: AppTab,
     pub rx: Option<Receiver<AppMessage>>,
+    
+    // Status Monitor
+    pub system: System,
+    pub cpu_usage: f32,
+    pub mem_usage: u64,
+    pub total_mem: u64,
+    
+    // Analytics
+    pub history: AnalyticsHistory, 
+    pub session_savings: u64,
+    pub session_original: u64,
+    pub session_compressed: u64,
 }
 
 impl App {
     pub fn new(scan_path: PathBuf, compression_level: i32) -> App {
         let mut list_state = TableState::default();
         list_state.select(Some(0));
+        
+        // Initialize System
+        let mut system = System::new_all();
+        system.refresh_all();
+        
+        // Load History
+        let history = AnalyticsHistory::load();
 
         App {
-            view: AppView::Home, // Start at Home
+            view: AppView::Home,
             items: Vec::new(),
             list_state,
             weissman_score: 5.2,
@@ -85,6 +108,18 @@ impl App {
 
             current_tab: AppTab::Scanner,
             rx: None,
+            
+            // Status Monitor
+            system,
+            cpu_usage: 0.0,
+            mem_usage: 0,
+            total_mem: 0,
+            
+            // Analytics
+            history,
+            session_savings: 0,
+            session_original: 0,
+            session_compressed: 0,
         }
     }
 
@@ -100,6 +135,14 @@ impl App {
             KeyCode::Char('1') | KeyCode::Enter => {
                 self.view = AppView::Dashboard;
                 self.current_tab = AppTab::Scanner;
+            }
+            KeyCode::Char('2') => {
+                 self.view = AppView::Dashboard;
+                 self.current_tab = AppTab::Analytics;
+            }
+            KeyCode::Char('3') => {
+                 self.view = AppView::Dashboard;
+                 self.current_tab = AppTab::Status;
             }
             KeyCode::Char('q') => {
                  // handled by main loop? No, main loop calls app.handle_input.
@@ -122,7 +165,7 @@ impl App {
 
 
             KeyCode::Char(' ') => self.toggle_selection(),
-            // KeyCode::Tab => self.next_tab(), // Disabled for now
+            KeyCode::Tab => self.next_tab(),
             KeyCode::Esc => {
                 if self.show_details {
                     self.show_details = false;
@@ -180,6 +223,11 @@ impl App {
     }
 
     pub fn tick(&mut self) {
+        // Always refresh status every tick (or throttle it if needed)
+        // For TUI smooth updates, we can do it here. 
+        // Real-world: maybe every 1s. But `sysinfo` refresh is cheap-ish.
+        self.tick_status();
+
         if self.is_scanning || self.is_compressing {
             self.spinner_state = (self.spinner_state + 1) % 4;
             
@@ -190,6 +238,8 @@ impl App {
                     messages.push(msg);
                 }
             }
+            
+            let mut session_finished = false;
 
             for msg in messages {
                 match msg {
@@ -209,6 +259,11 @@ impl App {
                                     if stats.original_size > stats.compressed_size {
                                         self.items[idx].status = FileStatus::Done;
                                         self.total_savings += stats.original_size - stats.compressed_size;
+                                        
+                                        // Track for history
+                                        self.session_savings += stats.original_size - stats.compressed_size;
+                                        self.session_original += stats.original_size;
+                                        self.session_compressed += stats.compressed_size;
                                     } else {
                                         // No savings or size increased, mark as Error
                                         self.items[idx].status = FileStatus::Error;
@@ -225,6 +280,7 @@ impl App {
                     AppMessage::CompressionDone => {
                         self.is_compressing = false;
                         self.rx = None;
+                        session_finished = true;
                     }
                     AppMessage::RestorationDone(idx, success) => {
                         if idx < self.items.len() && success {
@@ -245,7 +301,30 @@ impl App {
                     }
                 }
             }
+            
+            // Persist Session to History if finished and we had savings
+            if session_finished && self.session_savings > 0 {
+                self.history.add_entry(self.session_original, self.session_compressed);
+            }
         }
+    }
+
+    pub fn tick_status(&mut self) {
+        // Refresh CPU/Memory
+        // sysinfo 0.37: refresh_all covers everything safely.
+        self.system.refresh_all(); 
+        
+        self.cpu_usage = self.system.global_cpu_usage();
+        self.mem_usage = self.system.used_memory();
+        self.total_mem = self.system.total_memory();
+    }
+    
+    pub fn next_tab(&mut self) {
+        self.current_tab = match self.current_tab {
+            AppTab::Scanner => AppTab::Analytics,
+            AppTab::Analytics => AppTab::Status,
+            AppTab::Status => AppTab::Scanner,
+        };
     }
 
     fn calculate_score(&mut self) {
@@ -295,6 +374,11 @@ impl App {
     fn start_compression(&mut self) {
         if self.is_scanning || self.is_compressing { return; }
         self.is_compressing = true;
+        
+        // Reset session stats
+        self.session_savings = 0;
+        self.session_original = 0;
+        self.session_compressed = 0;
 
         let (tx, rx): (Sender<AppMessage>, Receiver<AppMessage>) = mpsc::channel();
         self.rx = Some(rx);

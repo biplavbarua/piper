@@ -3,7 +3,7 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Cell, Row, Table, List, ListItem, Paragraph, Tabs, Gauge, Chart, Axis, Dataset, GraphType
+        Block, Borders, Cell, Row, Table, List, ListItem, Paragraph, Tabs, Gauge, Chart, Axis, Dataset, GraphType, BarChart
     },
     symbols,
     Frame,
@@ -59,8 +59,6 @@ fn draw_home(f: &mut Frame) {
              Span::raw(" Find compressible artifacts"),
         ]),
         Line::from(""), // Spacer
-        /* 
-        // Disabled for v1.0
         Line::from(vec![
             Span::styled("2. Analytics ", Style::default().fg(Color::White)),
              Span::raw(" Visualize storage efficiency"),
@@ -70,7 +68,6 @@ fn draw_home(f: &mut Frame) {
              Span::styled("3. Status    ", Style::default().fg(Color::White)),
             Span::raw(" System health monitor"),
         ]),
-        */
         Line::from(vec![
              Span::styled("Q. Quit      ", Style::default().fg(Color::Red)),
             Span::raw(" Exit Application"),
@@ -84,7 +81,7 @@ fn draw_home(f: &mut Frame) {
     f.render_widget(menu_p, chunks[1]);
 
     // 3. Footer
-    let footer_text = " [1] Select | [Q] Quit ";
+    let footer_text = " [1-3] Select | [Q] Quit ";
     let footer = Paragraph::new(footer_text)
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::DarkGray));
@@ -97,7 +94,7 @@ fn draw_dashboard(f: &mut Frame, app: &mut App) {
         .constraints(
             [
                 Constraint::Length(1), // Minimal Header
-                // Constraint::Length(3), // Tabs - Removed for single view
+                Constraint::Length(3), // Tabs
                 Constraint::Min(0),    // Main Content
                 Constraint::Length(1), // Footer/Status Bar
             ]
@@ -106,12 +103,15 @@ fn draw_dashboard(f: &mut Frame, app: &mut App) {
         .split(f.area());
 
     draw_minimal_header(f, app, chunks[0]);
-    // draw_tabs(f, app, chunks[1]);
+    draw_tabs(f, app, chunks[1]);
     
-    // Direct render since only one tab
-    draw_file_list(f, app, chunks[1]);
+    match app.current_tab {
+        AppTab::Scanner => draw_file_list(f, app, chunks[2]),
+        AppTab::Analytics => draw_analytics(f, app, chunks[2]),
+        AppTab::Status => draw_status(f, app, chunks[2]),
+    }
     
-    draw_footer(f, app, chunks[2]);
+    draw_footer(f, app, chunks[3]);
 
     if app.show_details {
         draw_details_popup(f, app);
@@ -126,25 +126,108 @@ fn draw_minimal_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(p, area);
 }
 
-/*
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
-    let titles = vec![" Scanner ", " Analytics "];
+    let titles = vec![" Scanner ", " Analytics ", " Status "];
     let tabs = Tabs::new(titles)
         .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::UNDERLINED))
         .divider(" | ")
         .select(match app.current_tab {
             AppTab::Scanner => 0,
             AppTab::Analytics => 1,
+            AppTab::Status => 2,
         });
     f.render_widget(tabs, area);
 }
 
-fn draw_analytics(f: &mut Frame, app: &App, area: Rect) {
-    let text = Paragraph::new("\n\n   Analytics Module Coming Soon...")
+fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+             Constraint::Length(3), // CPU
+             Constraint::Length(3), // RAM
+             Constraint::Min(0),    // Details/Other
+        ].as_ref())
+        .margin(1)
+        .split(area);
+        
+    // CPU Gauge
+    let cpu_gauge = Gauge::default()
+        .block(Block::default().title(format!(" CPU Usage: {:.1}% ", app.cpu_usage)).borders(Borders::ALL))
+        .gauge_style(Style::default().fg(if app.cpu_usage > 80.0 { Color::Red } else { Color::Green }))
+        .percent(app.cpu_usage as u16);
+    f.render_widget(cpu_gauge, chunks[0]);
+    
+    // RAM Gauge
+    let mem_pct = (app.mem_usage as f64 / app.total_mem as f64) * 100.0;
+    let mem_gauge = Gauge::default()
+        .block(Block::default().title(format!(" Memory Usage: {:.1}% ({}/{}) ", mem_pct, format_size(app.mem_usage), format_size(app.total_mem))).borders(Borders::ALL))
+        .gauge_style(Style::default().fg(if mem_pct > 80.0 { Color::Red } else { Color::Cyan }))
+        .percent(mem_pct as u16);
+    f.render_widget(mem_gauge, chunks[1]);
+    
+    let info_text = Paragraph::new("\n   System Monitor Active.\n   Real-time metrics provided by `sysinfo`.")
         .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(text, area);
+    f.render_widget(info_text, chunks[2]);
 }
-*/
+fn draw_analytics(f: &mut Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Summary stats
+            Constraint::Min(0),    // Chart
+        ].as_ref())
+        .margin(1)
+        .split(area);
+        
+    // 1. Summary
+    let total_sessions = app.history.entries.len();
+    let all_time_savings: u64 = app.history.entries.iter().map(|e| e.savings).sum();
+    
+    let summary_text = format!(" All-Time Savings: {} | Total Sessions: {}", format_size(all_time_savings), total_sessions);
+    let summary = Paragraph::new(summary_text)
+        .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .block(Block::default().borders(Borders::ALL).title(" Overview "));
+    f.render_widget(summary, chunks[0]);
+    
+    // 2. Chart (Recent Activity)
+    // We take the last 10 entries
+    let take_last = 10;
+    let start_idx = app.history.entries.len().saturating_sub(take_last);
+    let recent_entries = &app.history.entries[start_idx..];
+    
+    if recent_entries.is_empty() {
+        let no_data = Paragraph::new("\n   No compression history yet.\n   Start compressing files to see trends here.")
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(no_data, chunks[1]);
+        return;
+    }
+    
+    // Prepare data for BarChart
+    // BarChart expects u64, but our sizes can be huge (GBs). We should conceptually normalize to MB for the chart height?
+    // Ratatui BarChart handles scaling automatically? No, it just draws bars.
+    // If values are 100,000,000 bytes, bars might be huge or clipped?
+    // We should scale to "MB".
+    
+    let data_points: Vec<(String, u64)> = recent_entries.iter().enumerate().map(|(i, e)| {
+        let label = format!("#{}", start_idx + i + 1); // Simple label #1, #2...
+        // Convert to MB for readability in values
+        let mb = e.savings / (1024 * 1024); 
+        (label, mb) 
+    }).collect();
+    
+    let bar_data: Vec<(&str, u64)> = data_points.iter().map(|(l, v)| (l.as_str(), *v)).collect();
+    
+    let chart = ratatui::widgets::BarChart::default()
+        .block(Block::default().title(" Savings Trend (MB) ").borders(Borders::ALL))
+        .data(&bar_data)
+        .bar_width(8)
+        .bar_gap(2)
+        .bar_style(Style::default().fg(Color::Cyan))
+        .value_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+        
+    f.render_widget(chart, chunks[1]);
+}
+
 
 
 
