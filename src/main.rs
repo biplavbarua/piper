@@ -17,6 +17,7 @@ mod app;
 mod compressor;
 mod scanner;
 mod ui;
+mod config;
 
 use app::App;
 
@@ -26,6 +27,10 @@ struct Args {
     /// Path to scan for optimization (default: ~/Developer)
     #[arg(short, long)]
     scan: Option<String>,
+
+    /// Path to configuration file
+    #[arg(short, long)]
+    config: Option<String>,
 }
 
 fn main() -> Result<()> {
