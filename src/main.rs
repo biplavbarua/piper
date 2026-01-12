@@ -18,6 +18,7 @@ mod compressor;
 mod scanner;
 mod ui;
 mod config;
+mod spyder;
 
 use app::App;
 
