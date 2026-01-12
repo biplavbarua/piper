@@ -11,7 +11,12 @@ Using a "Middle-Out" inspired engine (Zstandard), Piper achieves compression rat
 Most cleaners are just `rm -rf` wrappers. That's not innovation. That's just deletion.
 Piper is an **Archiving Platform**.
 
-### The Algorithm
+### The "Spyder" Algorithm
+We use our proprietary **Spyder** engine to crawl your filesystem. 
+Unlike linear scanners that waste time on the "crust" of your data, Spyder utilizes a **Middle-Out** heuristic. 
+It identifies the data centroid and threads outwards, ensuring that the most syntactically significant files are processed first.
+
+### The Algorithm (Compression)
 We leverage **Zstandard (zstd)** at Level 15.
 Why? Because **Gzip** is for Nucleus. Real compression needs to be fast, tight, and intelligent.
 
