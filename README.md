@@ -42,7 +42,7 @@ We ran a stress test (check the commit logs, it's verified).
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/piper
+git clone https://github.com/biplavbarua/piper
 cd piper
 cargo run
 ```
