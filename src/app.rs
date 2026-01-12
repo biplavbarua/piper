@@ -2,11 +2,11 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 use std::path::PathBuf;
-use ratatui::widgets::ListState;
+use ratatui::widgets::TableState;
 use crossterm::event::KeyCode;
 use rayon::prelude::*;
 
-use crate::scanner;
+use crate::spyder::{self, Spyder};
 use crate::compressor::{self, CompressionStats};
 
 pub struct FileItem {
@@ -14,6 +14,8 @@ pub struct FileItem {
     pub original_size: u64,
     pub compressed_size: Option<u64>,
     pub status: FileStatus,
+    pub reason: String,
+    pub selected: bool,
 }
 
 #[derive(PartialEq)]
@@ -33,9 +35,21 @@ pub enum AppMessage {
     RestorationDone(usize, bool), // index, success
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AppTab {
+    Scanner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AppView {
+    Home,
+    Dashboard,
+}
+
 pub struct App {
+    pub view: AppView, // New field for View State
     pub items: Vec<FileItem>,
-    pub list_state: ListState,
+    pub list_state: TableState,
     pub weissman_score: f64,
     pub total_savings: u64,
     pub is_scanning: bool,
@@ -44,15 +58,19 @@ pub struct App {
     pub show_details: bool,
     pub spinner_state: u8,
     pub scan_path: PathBuf,
+    pub compression_level: i32,
+
+    pub current_tab: AppTab,
     pub rx: Option<Receiver<AppMessage>>,
 }
 
 impl App {
-    pub fn new(scan_path: PathBuf) -> App {
-        let mut list_state = ListState::default();
+    pub fn new(scan_path: PathBuf, compression_level: i32) -> App {
+        let mut list_state = TableState::default();
         list_state.select(Some(0));
 
         App {
+            view: AppView::Home, // Start at Home
             items: Vec::new(),
             list_state,
             weissman_score: 5.2,
@@ -63,11 +81,35 @@ impl App {
             show_details: false,
             spinner_state: 0,
             scan_path,
+            compression_level,
+
+            current_tab: AppTab::Scanner,
             rx: None,
         }
     }
 
     pub fn handle_input(&mut self, key: KeyCode) {
+        match self.view {
+            AppView::Home => self.handle_home_input(key),
+            AppView::Dashboard => self.handle_dashboard_input(key),
+        }
+    }
+
+    fn handle_home_input(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Char('1') | KeyCode::Enter => {
+                self.view = AppView::Dashboard;
+                self.current_tab = AppTab::Scanner;
+            }
+            KeyCode::Char('q') => {
+                 // handled by main loop? No, main loop calls app.handle_input.
+                 // We don't have a Quit state here. Main loop usually breaks on Q.
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_dashboard_input(&mut self, key: KeyCode) {
         match key {
             KeyCode::Down | KeyCode::Char('j') => self.next(),
             KeyCode::Up | KeyCode::Char('k') => self.previous(),
@@ -77,9 +119,31 @@ impl App {
             KeyCode::Char('d') if !self.is_compressing && !self.is_restoring => self.delete_item(),
             KeyCode::Char('e') if !self.is_compressing && !self.is_restoring => self.restore_item(),
             KeyCode::Enter => self.toggle_details(),
+
+
+            KeyCode::Char(' ') => self.toggle_selection(),
+            // KeyCode::Tab => self.next_tab(), // Disabled for now
+            KeyCode::Esc => {
+                if self.show_details {
+                    self.show_details = false;
+                } else {
+                     // Go back to Home
+                     self.view = AppView::Home;
+                }
+            }
             _ => {}
         }
     }
+
+    pub fn toggle_selection(&mut self) {
+        if let Some(i) = self.list_state.selected() {
+            if i < self.items.len() {
+                self.items[i].selected = !self.items[i].selected;
+            }
+        }
+    }
+
+    // pub fn next_tab(&mut self) { ... } // Removed
 
     pub fn toggle_details(&mut self) {
         if !self.items.is_empty() {
@@ -141,10 +205,14 @@ impl App {
                         if idx < self.items.len() {
                             match result {
                                 Ok(stats) => {
-                                    self.items[idx].status = FileStatus::Done;
                                     self.items[idx].compressed_size = Some(stats.compressed_size);
                                     if stats.original_size > stats.compressed_size {
+                                        self.items[idx].status = FileStatus::Done;
                                         self.total_savings += stats.original_size - stats.compressed_size;
+                                    } else {
+                                        // No savings or size increased, mark as Error
+                                        self.items[idx].status = FileStatus::Error;
+                                        self.items[idx].reason = "No savings or size increased".to_string();
                                     }
                                 },
                                 Err(_) => {
@@ -206,8 +274,9 @@ impl App {
 
         thread::spawn(move || {
             let mut results = Vec::new();
-            // Use configured path
-            let scan_res = scanner::scan_logs(&scan_root);
+            // Spyder V2: Parallel Crawl
+            let spyder = Spyder::new(scan_root);
+            let scan_res = spyder.crawl();
                  
             for res in scan_res {
                 results.push(FileItem {
@@ -215,6 +284,8 @@ impl App {
                     original_size: res.size,
                     compressed_size: None,
                     status: FileStatus::Found,
+                    reason: res.reason,
+                    selected: false,
                 });
             }
             let _ = tx.send(AppMessage::ScanComplete(results));
@@ -228,10 +299,13 @@ impl App {
         let (tx, rx): (Sender<AppMessage>, Receiver<AppMessage>) = mpsc::channel();
         self.rx = Some(rx);
 
-        // Collect files to compress (indices and paths) to pass to thread
-        // We verify status is Found to avoid re-compressing
+        // Collect files to compress
+        // Logic: If any items are selected, compress ONLY selected. Else, compress ALL found.
+        let has_selection = self.items.iter().any(|i| i.selected);
+
         let targets: Vec<(usize, PathBuf)> = self.items.iter().enumerate()
             .filter(|(_, item)| item.status == FileStatus::Found)
+            .filter(|(_, item)| !has_selection || item.selected)
             .map(|(i, item)| (i, PathBuf::from(&item.path)))
             .collect();
 
@@ -240,10 +314,12 @@ impl App {
             self.items[*i].status = FileStatus::Compressing;
         }
 
+        let compression_level = self.compression_level;
+
         thread::spawn(move || {
             // Parallel Compression using Rayon
-            targets.into_par_iter().for_each_with(tx.clone(), |s, (idx, path)| {
-                let res = compressor::compress_file(&path).map_err(|e| e.to_string());
+            targets.into_par_iter().for_each_with((tx.clone(), compression_level), |(s, level), (idx, path)| {
+                let res = compressor::compress_file(&path, *level).map_err(|e| e.to_string());
                 let _ = s.send(AppMessage::CompressionProgress(idx, res));
             });
             
@@ -252,36 +328,43 @@ impl App {
     }
 
     fn delete_item(&mut self) {
-        if let Some(i) = self.list_state.selected() {
-            if i < self.items.len() {
-                let path = PathBuf::from(&self.items[i].path);
-                if path.exists() {
-                    let res = if path.is_dir() {
-                        std::fs::remove_dir_all(&path)
-                    } else {
-                        std::fs::remove_file(&path)
-                    };
+        let has_selection = self.items.iter().any(|i| i.selected);
+        
+        let indices: Vec<usize> = if has_selection {
+            self.items.iter().enumerate()
+                .filter(|(_, i)| i.selected)
+                .map(|(idx, _)| idx)
+                .collect()
+        } else {
+             if let Some(i) = self.list_state.selected() {
+                 vec![i]
+             } else {
+                 vec![]
+             }
+        };
 
-                    match res {
-                        Ok(_) => {
-                            self.items[i].status = FileStatus::Deleted;
-                            self.calculate_score(); // Recalc score ignoring this? Or keeping it?
-                            // Logic: If deleted, it counts as 100% savings? 
-                            // Or just remove from score calculation?
-                            // Current calc_score uses all items.
-                            // If deleted, compressed size?
-                            // Let's say deleted means size becomes 0.
-                            self.items[i].compressed_size = Some(0);
-                            self.total_savings += self.items[i].original_size;
-                            self.calculate_score();
-                        }
-                        Err(_) => {
-                            self.items[i].status = FileStatus::Error;
-                        }
-                    }
-                }
+        for i in indices {
+            if i < self.items.len() {
+                 let path = PathBuf::from(&self.items[i].path);
+                 // Only delete if it exists (or if we think it exists)
+                 // trash::delete handles non-existence nicely? 
+                 // It returns error if file doesn't exist.
+                 if path.exists() {
+                     match trash::delete(&path) {
+                         Ok(_) => {
+                             self.items[i].status = FileStatus::Deleted;
+                             // Treat deletion as 100% savings for the score
+                             self.items[i].compressed_size = Some(0);
+                             self.total_savings += self.items[i].original_size;
+                         }
+                         Err(_) => {
+                             self.items[i].status = FileStatus::Error;
+                         }
+                     }
+                 }
             }
         }
+        self.calculate_score();
     }
 
 
@@ -303,7 +386,20 @@ impl App {
 
                     thread::spawn(move || {
                         // Decompress
-                        let zst_path = path.with_extension(format!("{}.zst", path.extension().unwrap_or_default().to_string_lossy()));
+                        // Decompress
+                        // Check for .tar.zst first (directories)
+                        // If path was "folder", output was "folder.tar.zst"
+                        let tar_zst = path.with_extension("tar.zst");
+                        // If path was "folder.ext", output was "folder.tar.zst" ? No, I constructed it with to_string_lossy.
+                        // In compressor: PathBuf::from(format!("{}.tar.zst", input_path.to_string_lossy()));
+                        // So if path is "folder", it is "folder.tar.zst".
+                        let tar_path = PathBuf::from(format!("{}.tar.zst", path.to_string_lossy()));
+                        
+                        let zst_path = if tar_path.exists() {
+                            tar_path
+                        } else {
+                            path.with_extension(format!("{}.zst", path.extension().unwrap_or_default().to_string_lossy()))
+                        };
                         
                         let success = match compressor::decompress_file(&zst_path) {
                             Ok(_) => true,

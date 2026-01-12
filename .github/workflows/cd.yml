@@ -1,0 +1,56 @@
+name: CD
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            artifact_name: piper
+            asset_name: piper-mac.tar.gz
+          - os: ubuntu-latest
+            artifact_name: piper
+            asset_name: piper-linux.tar.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Release
+        run: cargo build --release
+
+      - name: Create Archive
+        run: |
+          tar -czf ${{ matrix.asset_name }} -C target/release ${{ matrix.artifact_name }}
+
+      - name: Calculate Checksum
+        id: shasum
+        run: |
+          if [ "${{ runner.os }}" == "macOS" ]; then
+            echo "sha=$(shasum -a 256 ${{ matrix.asset_name }} | awk '{print $1}')" >> $GITHUB_OUTPUT
+          else
+            echo "sha=$(sha256sum ${{ matrix.asset_name }} | awk '{print $1}')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ matrix.asset_name }}
+          body: |
+            ### Checksums
+            ${{ matrix.asset_name }}: `${{ steps.shasum.outputs.sha }}`
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

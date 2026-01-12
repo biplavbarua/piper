@@ -15,12 +15,13 @@ use ratatui::{
 
 mod app;
 mod compressor;
-mod scanner;
+
 mod ui;
 mod config;
 mod spyder;
 
 use app::App;
+use config::Config;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -35,20 +36,32 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
     let args = Args::parse();
 
-    let scan_path = if let Some(path_str) = args.scan {
-        PathBuf::from(path_str)
+    let config = if let Some(config_path) = &args.config {
+        Config::load_from_file(config_path).ok()
     } else {
-        // Default: ~/Developer
-        match dirs::home_dir() {
-            Some(mut p) => {
-                p.push("Developer");
-                p
-            },
-            None => PathBuf::from("."), // Fallback
-        }
+        None
     };
+
+    let scan_path = args.scan
+        .or_else(|| config.as_ref().and_then(|c| c.scan.clone()))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            // Default: ~/Developer
+            match dirs::home_dir() {
+                Some(mut p) => {
+                    p.push("Developer");
+                    p
+                },
+                None => PathBuf::from("."), // Fallback
+            }
+        });
+
+    let compression_level = config.as_ref()
+        .and_then(|c| c.compression_level)
+        .unwrap_or(15); // Default Middle-Out Level
 
     // Setup terminal
     enable_raw_mode()?;
@@ -58,7 +71,7 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app with path
-    let mut app = App::new(scan_path);
+    let mut app = App::new(scan_path, compression_level);
 
     // Run app
     let res = run_app(&mut terminal, &mut app);
